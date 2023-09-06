@@ -1,0 +1,1374 @@
+---
+title: "Treatment Patterns and Outcomes of Preoperative Neoadjuvant Radiotherapy in Patients with Early-onset Rectal Cancer"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+---
+
+<style>
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+
+<style type="text/css">
+.main-container {
+  max-width: 100% !important;
+  margin: auto;
+}
+</style>
+
+
+This work has been published in Cancer Research Communications journal in April 2023.
+Available: https://doi.org/10.1158/2767-9764.CRC-22-0385
+
+
+# About Dataset
+The original dataset used in this project was provided by BC Cancer 
+Gastrointestinal Cancer Outcomes Unit (GICOU) and BC Vital Statistics. It 
+contains a total of 20136 colorectal cancer cases received radiotherapy in BC
+between 2002 and 2016. All personal identifiers (agency ID, PHN, and DOB, etc.)
+were removed before saving the data into a csv file.
+
+
+# Load Packages
+```{r setup_markdown}
+library(knitr)
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, dpi = 100)
+library(kableExtra)
+```
+
+```{r setup_library}
+library(tidyverse)
+options(dplyr.summarise.inform = FALSE)
+library(xlsx)
+library(binom)
+library(ggrepel)
+library(ggalluvial)
+library(survival)
+library(survminer)
+```
+
+
+# Data Import
+```{r data_import}
+data_raw <- read_csv("EOcrc_final_GI_RT_prot_w_Chemo_RTvars_20211123_personal_info_removed.csv",
+                          show_col_types = FALSE)
+```
+
+
+# Data Cleaning
+
+* Select columns: A total of 285 columns were identified in the original data
+but only 91 were selected for further analysis.
+* Assign age groups in two different ways:
+  + <=29, 30-39, 40-49 or >=50
+  + <50 or >=50
+* Determine geographic location: rural or urban?
+  + Parse the second digit of the postal code
+  + "0" - rural, other numbers - urban.
+* Convert `cT`, `cN`, `pT`, `pN` into numbers.
+  + Use `neoadjuvant` as flag for any further analysis.
+* Replace unknown information with `NA`.
+* Convert date entries into proper date format.
+
+```{r data_cleaning}
+data_cleaned <- data_raw %>% 
+  select(diagnosis_date, site_admit_date, age_at_diagnosis, loc_at_diag, sex,
+         performance_status, site, behavior, hist1, final_grade, tumour_subgroup,
+         cT, cN, overall_clin_stg, pT, pN, m_stg, overall_path_stg, overall_stg,
+         neoadjuvant, M1_at_Dx, COL_tum_size, final_tot_nodes, final_pos_nodes,
+         final_MSI, cr_anal_verge_dist_onco, cr_anal_verge_dist_status_onco,
+         final_CEA, cr_prim_site_p00020, final_margin_status, GI_RT_protcode1,
+         cr_rt_prim_onco, cr_rt_prim_p00020, cr_system_tx_dt_onco,
+         cr_system_tx_dt_fst_p00020, cr_system_tx_dt_stat_onco, cr_system_tx_onco,
+         cr_system_tx_p00020, cr_system_tx_type_fst_p00020, surg_treat_date1,
+         surg_treat_date2, surg_treat_date3, surg_treat_date4, RT_start_date1,
+         RT_end_date1, RT_start_date2, RT_end_date2, RT_start_date3, RT_end_date3,
+         RT_start_date4, RT_end_date4, RT_start_date5, RT_end_date5, RT_start_date6,
+         RT_end_date6, m1dtofdx, m1site, fst_relapse_date, fst_reg_dist_date,
+         LOCIND, LOCDATE, LOCSITE, REGIND, REGDATE, REGSITE, DISTIND, DISTDATE, DISTSITE,
+         subseq_colorectalca, subseq_CRC_dx_date, pat_status, death_date,
+         FINAL_last_contact_date, survyrs, colorectaldeath, colorectaldthdat,
+         loctodth, regtodth, distant_date, anyreldt, anyenddt, anysurv, anystat,
+         locregdate, locsurv, locstat,locenddt, min_mets_date,
+         survyrs_from_dist_mets, relapse_to_lcd, dx_to_final_lcd) %>% 
+  mutate(
+    ## Assign age groups
+    age_group1 = cut(age_at_diagnosis, breaks = c(0, 49, Inf),
+                     labels = c("<50", ">=50")) %>% 
+      factor(),
+    age_group2 = cut(age_at_diagnosis, breaks = c(0, 29, 39, 49, Inf),
+                     labels = c("<=29", "30-39", "40-49", ">=50")) %>% 
+      factor(),
+    
+    ## remove unknown status (mostly number 8 or 9)
+    across(c(performance_status, final_grade, overall_path_stg,
+             overall_clin_stg, final_margin_status, colorectaldeath),
+           ~ifelse(.x <= 4, .x, NA)),
+    final_MSI = ifelse(final_MSI %in% c(7, 8), NA, final_MSI),
+    
+    ## convert T and N stage info into numbers
+    across(c(cT, cN, pT, pN), parse_number),
+    
+    ## remove unknown node info (numbers > 90)
+    across(c(final_tot_nodes, final_pos_nodes), ~ifelse(.x > 90, NA, .x)),
+    
+    ## remove unknown CEA info (numbers > 988), convert 980 to 98 (>98 category)
+    final_CEA = ifelse(final_CEA > 988, NA, ifelse(final_CEA == 980, 98, final_CEA)),
+    
+    ## remove unknown margin status
+    final_margin_status = ifelse(final_margin_status > 2, NA, final_margin_status),
+    
+    ## convert into date format
+    across(c(diagnosis_date, site_admit_date, FINAL_last_contact_date,
+             colorectaldthdat, distant_date, anyreldt, anyenddt, 
+             locregdate, locenddt, min_mets_date),
+           ~as.Date(.x, "%d-%b-%y")),
+    across(c(cr_system_tx_dt_onco, surg_treat_date1, surg_treat_date2,
+             surg_treat_date3, surg_treat_date4, RT_start_date1, RT_end_date1,
+             RT_start_date2, RT_end_date2, RT_start_date3, RT_end_date3,
+             RT_start_date4, RT_end_date4, RT_start_date5, RT_end_date5,
+             RT_start_date6, RT_end_date6, m1dtofdx, fst_relapse_date,
+             fst_reg_dist_date, LOCDATE, REGDATE, DISTDATE, subseq_CRC_dx_date,
+             death_date),
+           ~as.Date(.x, "%m/%d/%Y")))
+```
+
+
+# Chart Review and Data Correction
+Any data entry errors found throughout the entire analysis were corrected in 
+this step. (Codes are hidden here.)
+```{r data_correction, echo = FALSE}
+# correction (tumor distance) ----
+data_cleaned <- data_cleaned %>% 
+  mutate(
+    ## row 8315: 28 -> 2.8
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-07-09" & age_at_diagnosis == 67,
+                                      2.8),
+    ## row 13700: 50 -> 5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-02-15" & age_at_diagnosis == 85,
+                                      5),
+    ## row 13723: 65 -> 6.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-05-30" & age_at_diagnosis == 53,
+                                      6.5),
+    ## row 19312: 27 -> 2.7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-06-14" & age_at_diagnosis == 60,
+                                      2.7),
+    ## row 13992: 70 -> 7.1
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-06-25" & age_at_diagnosis == 61,
+                                      7.1),
+    ## row 14048: 55 -> 5.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-07-22" & age_at_diagnosis == 62,
+                                      5.5),
+    ## row 14127: 47 -> 4.7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-08-01" & age_at_diagnosis == 78,
+                                      4.7),
+    ## row 14162: 80 -> 10 (mass spanning 8-12 cm)
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-08-19" & age_at_diagnosis == 72,
+                                      10),
+    ## row 14443: 40 -> 4
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-08-27" & age_at_diagnosis == 64,
+                                      4),
+    ## row 14811: 70 -> 6.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2014-02-13" & age_at_diagnosis == 62,
+                                      6.5),
+    ## row 16090: 50 -> 5.2
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-01-13" & age_at_diagnosis == 59,
+                                      5.2),
+    ## row 16150: 45 -> 4.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-02-27" & age_at_diagnosis == 68,
+                                      4.5),
+    ## row 16160: 80 -> 7.8
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-02-06" & age_at_diagnosis == 68,
+                                      7.8),
+    ## row 16180: 29 -> 2.9
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-03-02" & age_at_diagnosis == 75,
+                                      2.9),
+    ## row 16208: 45 -> 4.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-03-06" & age_at_diagnosis == 74,
+                                      4.5),
+    ## row 16458: 82 -> 8.2
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-04-29" & age_at_diagnosis == 36,
+                                      8.2),
+    ## row 16476: 57 -> 5.7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-05-26" & age_at_diagnosis == 74,
+                                      5.7),
+    ## row 16500: 80 -> 8.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-06-02" & age_at_diagnosis == 42,
+                                      8.5),
+    ## row 16587: 60 -> 6
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-06-29" & age_at_diagnosis == 55,
+                                      6),
+    ## row 16613: 37 -> 3.7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-07-06" & age_at_diagnosis == 39,
+                                      3.7),
+    ## row 16932: 35 -> 3.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-09-15" & age_at_diagnosis == 59,
+                                      3.5),
+    ## row 16964: 40 -> 3.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-10-15" & age_at_diagnosis == 59,
+                                      3.5),
+    ## row 18361: 46 -> 4.6
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2016-11-28" & age_at_diagnosis == 52,
+                                      4.6),
+    ## row 18415: 43 -> 4.3
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2016-12-05" & age_at_diagnosis == 53,
+                                      4.3),
+    ## row 18603: 70 -> 7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-02-04" & age_at_diagnosis == 87,
+                                      7),
+    ## row 19876: 70 -> 6.7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2016-08-02" & age_at_diagnosis == 65,
+                                      6.7),
+    ## row 14201: 60 -> 6
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2013-08-26" & age_at_diagnosis == 51,
+                                      6),
+    ## row 16239: 25 -> 2.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-03-12" & age_at_diagnosis == 44,
+                                      2.5),
+    ## row 16383: 45 -> 15
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-02-27" & age_at_diagnosis == 79,
+                                      15),
+    ## row 16656: 20 -> 10
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-07-03" & age_at_diagnosis == 67,
+                                      10),
+    ## row 16861: 47 -> 4.7
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-09-25" & age_at_diagnosis == 69,
+                                      4.7),
+    ## row 17260: 30 -> 2.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2015-12-02" & age_at_diagnosis == 50,
+                                      2.5),
+    ## row 17554: 96 -> 9.5
+    cr_anal_verge_dist_onco = replace(cr_anal_verge_dist_onco,
+                                      site == "C209" & diagnosis_date == "2016-03-29" & age_at_diagnosis == 36,
+                                      9.5))
+
+# correction (short course -> long course) ----
+data_cleaned <- data_cleaned %>% 
+  mutate(
+    ## row 3686: 1 -> 2
+    cr_rt_prim_p00020 = replace(cr_rt_prim_p00020,
+                                site == "C209" & diagnosis_date == "2005-02-25" & age_at_diagnosis == 69,
+                                2),
+    ## row 6383: 1 -> 2
+    cr_rt_prim_p00020 = replace(cr_rt_prim_p00020,
+                                site == "C209" & diagnosis_date == "2007-07-10" & age_at_diagnosis == 45,
+                                2),
+    ## row 9071: 1 -> 2
+    cr_rt_prim_p00020 = replace(cr_rt_prim_p00020,
+                                site == "C209" & diagnosis_date == "2009-09-04" & age_at_diagnosis == 49,
+                                2),
+    ## row 12013: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                                site == "C209" & diagnosis_date == "2013-11-04" & age_at_diagnosis == 81,
+                                2),
+    ## row 12280: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2012-03-05" & age_at_diagnosis == 50,
+                              2),
+    ## row 12545: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2012-06-12" & age_at_diagnosis == 69,
+                              2),
+    ## row 12637: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2012-07-06" & age_at_diagnosis == 60,
+                              2),
+    ## row 13517: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2013-03-15" & age_at_diagnosis == 49,
+                              2),
+    ## row 13850: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2013-05-03" & age_at_diagnosis == 80,
+                              2),
+    ## row 15213: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2014-06-03" & age_at_diagnosis == 55,
+                              2),
+    ## row 15767: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2014-10-27" & age_at_diagnosis == 45,
+                              2),
+    ## row 16772: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2015-08-10" & age_at_diagnosis == 64,
+                              2),
+    ## row 18415: 1 -> 2
+    cr_rt_prim_onco = replace(cr_rt_prim_onco,
+                              site == "C209" & diagnosis_date == "2016-12-05" & age_at_diagnosis == 53,
+                              2))
+```
+
+
+# Filtering and Calculation
+1. Select all rectal cancer cases:
+    - Select `site == "C209"` (`site_desc == "Rectum, NOS"`) to select all rectal cancer cases.
+    - DO NOT use `tumor_subgroup == "RE"` as it contains non-rectal cancer cases.
+    - Exclude 1 case of `hist1 == 80453` (`hist1_desc == "Combined small cell carcinoma"`) and 9 cases of `hist1 == 81482` (`hist1_desc == "Glandular intraepithelial heoplasia, grade III`).
+    - Exclude 2 cases of `cr_prim_site_p00020 == "B"` (`cr_prim_site_p00020 == "Rectosigmoid Junction"`).
+2. Merge tumor location columns `cr_prim_site_p00020` and `cr_anal_verge_dist_onco`.
+    - Create two new columns `dist_merged` and `loc_merged`.
+    - Convert the group letters into averaged distances in `dist_merged`, e.g. `"Rectum, upper (11-15 cm)"` &rarr; `13`, `"Rectum, mid (5-10.9 cm)"` &rarr; `8`.
+    - Convert the distances into group letters in `loc_merged`.
+3. Calculate tumor stage changes.
+4. Calculate each RT duration.
+5. Merge RT information columns `cr_rt_prim_onco` and `cr_rt_prim_p00020`.
+    - Create `rt_merged` column
+    - Select `rt_merged` values 1 (pre-op short) and 2 (pre-op long), categorize into long course group and short course group
+    - Check `rt_merged` values 5, 77, 88 whether any cases qualify for pre-op RT (compare `surg_treat_date1` and `RT_start_date1`) &rarr; result: none qualified
+6. Categorize multiple parameters
+
+```{r data_filtering}
+data_filtered <- data_cleaned %>% 
+  ## select all rectal cancer cases
+  filter(site  == "C209", hist1 != 80453, hist1 != 81482,
+         (cr_prim_site_p00020 != "B") |
+           is.na(cr_prim_site_p00020),
+         (cr_anal_verge_dist_onco <= 15) |
+           (cr_anal_verge_dist_onco %in% c(89, 99)) |
+           is.na(cr_anal_verge_dist_onco)) %>% 
+  
+  ## merge distance/location info for further processing
+  unite("dist_merged", c(cr_prim_site_p00020, cr_anal_verge_dist_onco),
+        na.rm = TRUE, remove = FALSE) %>%
+  
+  ## merge RT info for further processing
+  unite("rt_merged", c(cr_rt_prim_onco, cr_rt_prim_p00020),
+        na.rm = TRUE, remove = FALSE) %>% 
+  
+  mutate(
+    ## relabel sex
+    sex = factor(sex, levels = c("F", "M"), labels = c("Female", "Male")),
+    
+    ## determine rural/urban
+    rural_urban = ifelse(is.na(loc_at_diag), "Unknown",
+                         ifelse(grepl(".0....", loc_at_diag), "Rural", "Urban")) %>% 
+      factor(levels = c("Rural", "Urban", "Unknown")),
+    
+    ## convert letter into avg distance
+    dist_merged = case_when(dist_merged == "C" ~ 13, # rectum, upper (11-15 cm)
+                            dist_merged == "D" ~ 8, # rectum, mid (5-10.9 cm)
+                            dist_merged == "E" ~ 2.5, # rectum, distal (<5 cm)
+                            TRUE ~ as.numeric(dist_merged)),
+    
+    ## convert distance to letter
+    loc_merged = case_when(cr_prim_site_p00020 == "C" ~ "Proximal (11-15 cm)",
+                           cr_prim_site_p00020 == "D" ~ "Mid (5-10.9 cm)",
+                           cr_prim_site_p00020 == "E" ~ "Distal (<5 cm)",
+                           # cr_prim_site_p00020 == "F" ~ "NOS",
+                           is.na(cr_prim_site_p00020) &
+                             ((cr_anal_verge_dist_onco >= 11) &
+                                (cr_anal_verge_dist_onco <= 15)) ~
+                             "Proximal (11-15 cm)",
+                           is.na(cr_prim_site_p00020) &
+                             ((cr_anal_verge_dist_onco >= 5) &
+                                (cr_anal_verge_dist_onco < 11)) ~
+                             "Mid (5-10.9 cm)",
+                           is.na(cr_prim_site_p00020) &
+                             (cr_anal_verge_dist_onco < 5) ~
+                             "Distal (<5 cm)") %>%
+                           # TRUE ~ "NOS") %>% 
+      factor(levels = c("Distal (<5 cm)", "Mid (5-10.9 cm)",
+                        "Proximal (11-15 cm)")),
+    
+    ## pCR status
+    pCR = case_when(((pT == 0) & (pN == 0)) | (overall_path_stg == 0) ~ "Yes",
+                    !is.na(pT) & !is.na(pN) ~ "No") %>% 
+      factor(levels = c("No", "Yes")),
+    pT = case_when(pCR == "Yes" ~ 0,
+                   TRUE ~ pT),
+    pN = case_when(pCR == "Yes" ~ 0,
+                   TRUE ~ pN),
+    overall_path_stg = case_when(pCR == "Yes" ~ 0,
+                                 TRUE ~ overall_path_stg),
+    
+    ## calculate changes in cancer stages
+    T_stg_change = pT - cT,
+    T_stg_change_status = case_when(T_stg_change < 0 ~ "Downstage",
+                                    T_stg_change == 0 ~ "No change",
+                                    T_stg_change > 0 ~ "Upstage") %>% 
+      factor(),
+    N_stg_change = pN - cN,
+    N_stg_change_status = case_when(N_stg_change < 0 ~ "Downstage",
+                                    N_stg_change == 0 ~ "No change",
+                                    N_stg_change > 0 ~ "Upstage") %>% 
+      factor(),
+    overall_stg_change = overall_path_stg - overall_clin_stg,
+    overall_stg_change_status = case_when(overall_stg_change < 0 ~ "Downstage",
+                                          overall_stg_change == 0 ~ "No change",
+                                          overall_stg_change > 0 ~ "Upstage") %>% 
+      factor(),
+    
+    ## pCR status
+    pCR = case_when((pT == 0) & (pN == 0) ~ "Yes",
+                    !is.na(pT) & !is.na(pN) ~ "No") %>% 
+      factor(levels = c("No", "Yes")),
+    
+    ## calculate RT durations
+    RT_duration1 = RT_end_date1 - RT_start_date1,
+    RT_duration2 = RT_end_date2 - RT_start_date2,
+    RT_duration3 = RT_end_date3 - RT_start_date3,
+    RT_duration4 = RT_end_date4 - RT_start_date4,
+    RT_duration5 = RT_end_date5 - RT_start_date5,
+    RT_duration6 = RT_end_date6 - RT_start_date6,
+    
+    ## identify pre-op RT and categorize into short and long course groups
+    rt_merged = as.integer(rt_merged),
+    rt_course = case_when(rt_merged == 1 ~ "Short-course RT",
+                          (rt_merged == 2) & (is.na(GI_RT_protcode1)) ~ "Long-course RT",
+                          (rt_merged == 2) & (!is.na(GI_RT_protcode1)) ~ "Long-course chemoRT") %>% 
+      factor(levels = c("Short-course RT", "Long-course RT", "Long-course chemoRT")),
+    
+    ## categorize tumor grade
+    grade = case_when(final_grade %in% c(1, 2) ~ "Well-Differentiated (Grades 1 and 2)",
+                      final_grade %in% c(3, 4) ~ "Poorly Differentiated (Grades 3 and 4)",
+                      final_grade == 0 ~ "Grade 0") %>% 
+      factor(levels = c("Grade 0", "Well-Differentiated (Grades 1 and 2)",
+                        "Poorly Differentiated (Grades 3 and 4)")),
+    
+    ## categorize cancer types
+    histology = case_when(hist1 %in% c(80103, 80203, 80463, 81402, 81403, 81443,
+                                       82102, 82103, 82113, 82203, 82213, 82553,
+                                       82612, 82613, 82632, 82633) ~ "Adenocarcinoma",
+                          hist1 %in% c(84803, 84813, 84903) ~ "Mucinous/Signet",
+                          TRUE ~ "Other") %>%
+      factor(),
+    
+    ## categorize MSI
+    MSI_group = case_when(final_MSI %in% c(1, 2) ~ "MSI stable",
+                          final_MSI %in% c(3, 9) ~ "MSI unstable, NOS; positive, NOS") %>% 
+      factor(),
+    
+    ## categorize margin status
+    margin = case_when(final_margin_status == 0 ~ "Microscopic Margins Clear",
+                       final_margin_status == 1 ~ "Microscopic Margins positive (<=1mm)",
+                       final_margin_status == 2 ~ "Macroscopic Residual Cancer, grossly positive") %>% 
+      factor(levels = c("Microscopic Margins Clear", "Microscopic Margins positive (<=1mm)",
+                        "Macroscopic Residual Cancer, grossly positive")),
+    
+    ## categorize node status
+    node_total = case_when(final_tot_nodes >= 12 ~ ">=12",
+                           final_tot_nodes < 12 ~ "<12") %>% 
+      factor(),
+    node_positive = case_when(final_pos_nodes == 0 ~ "0",
+                              final_pos_nodes %in% c(1, 2) ~ "1-2",
+                              final_pos_nodes %in% c(3, 4) ~ "3-4",
+                              (final_pos_nodes >= 5) & (final_pos_nodes <= 9) ~ "5-9",
+                              final_pos_nodes >= 10 ~ "10+") %>% 
+      factor(levels = c("0", "1-2", "3-4", "5-9", "10+")),
+    
+    ## overall survival status
+    surv_status = case_when(pat_status == "A" ~ 0,
+                            pat_status == "D" ~ 1),
+    
+    ## disease specific status
+    crc_death_status = case_when(colorectaldeath == 1 ~ 1,
+                                 TRUE ~ 0),
+    
+    ## disease free status
+    recurr_status = case_when(LOCIND | REGIND | DISTIND |
+                                subseq_colorectalca | surv_status ~ 1,
+                              TRUE ~ 0),
+    dis_free_yrs = pmin(as.numeric((pmin(LOCDATE, REGDATE, DISTDATE, subseq_CRC_dx_date, death_date,
+                                         na.rm = TRUE)-diagnosis_date)/365.25),
+                        survyrs, na.rm = TRUE),
+    
+    ## disease free status with non CRC censored
+    crc_recurr_status = case_when(LOCIND | REGIND | DISTIND |
+                                    subseq_colorectalca | crc_death_status ~ 1,
+                                  TRUE ~ 0),
+    crc_recurr_free_yrs = pmin(as.numeric((pmin(LOCDATE, REGDATE, DISTDATE, subseq_CRC_dx_date, colorectaldthdat,
+                                                na.rm = TRUE)-diagnosis_date)/365.25),
+                               survyrs, na.rm = TRUE)
+  )
+```
+
+
+# Function for summarizing non-metastatic rectal cancer baseline data
+```{r summary_function_general}
+summary_general <- function(df, group_var) {
+  var <- deparse(substitute(group_var))
+  Reduce(function(x, y) merge(x, y, by = var, all = TRUE),
+         list(df %>% 
+                filter(M1_at_Dx == 0) %>% 
+                group_by(age_group2, {{group_var}}) %>% 
+                summarize(sub_total = n()) %>% 
+                pivot_wider(names_from = age_group2, values_from = sub_total) %>% 
+                mutate_at(vars(-var), ~replace(., is.na(.), 0)) %>% 
+                select(-`>=50`),
+              df %>% 
+                filter(M1_at_Dx == 0) %>% 
+                group_by(age_group1, {{group_var}}) %>% 
+                summarize(sub_total = n()) %>% 
+                pivot_wider(names_from = age_group1, values_from = sub_total) %>% 
+                mutate_at(vars(-var), ~replace(., is.na(.), 0)),
+              df %>% 
+                filter(M1_at_Dx == 0) %>% 
+                group_by({{group_var}}) %>% 
+                summarize(`Grand Total` = n()) %>% 
+                mutate_at(vars(-var), ~replace(., is.na(.), 0)))
+  ) %>% 
+    arrange({{group_var}}) %>%
+    mutate({{group_var}} := as.character({{group_var}})) %>%
+    filter(!is.na({{group_var}})) %>%
+    bind_rows(summarize(., across(where(is.numeric), sum),
+                        across(where(is.character), ~"Subtotal"))) %>%
+    rename(Parameter = {{group_var}}) %>% 
+    
+    # add percentage
+    mutate_at(vars(-Parameter),
+              ~if_else((Parameter != "Subtotal") & (.x != 0),
+                       paste0(.x, ' (', sprintf("%.1f", round(.x/.x[Parameter == "Subtotal"]*100, 1)), ')'),
+                       # paste0(.x, ' (', sprintf("%.1f", round(.x/sum(.x)*100, 1)), ')'),
+                       as.character(.x)))
+}
+```
+
+# Table 1: Baseline characteristics for all non-metastatic rectal cancer cases
+```{r summary_table1, echo = FALSE}
+summary1_combined <- bind_rows(summary_general(data_filtered, sex),
+                               summary_general(data_filtered, rural_urban),
+                               summary_general(data_filtered, loc_merged), 
+                               summary_general(data_filtered, grade),
+                               summary_general(data_filtered, histology), 
+                               summary_general(data_filtered, MSI_group),
+                               summary_general(data_filtered, margin), 
+                               summary_general(data_filtered, cT),
+                               summary_general(data_filtered, cN), 
+                               summary_general(data_filtered, overall_clin_stg),
+                               summary_general(data_filtered, pT), 
+                               summary_general(data_filtered, pN),
+                               summary_general(data_filtered, overall_path_stg)) %>% 
+  rename(`Baseline Characteristics` = Parameter)
+
+kable(summary1_combined, align = "lcccccc") %>% 
+  kable_classic(bootstrap_options = c("hover", "responsive"),
+                full_width = F,
+                fixed_thead = T) %>% 
+  row_spec(0, bold = T) %>% 
+  pack_rows(index = c("Sex" = 3,
+                      "Geographic Location" = 4,
+                      "Tumor Location" = 4,
+                      "Tumor Grade" = 3,
+                      "Histology" = 4,
+                      "MSI" = 3,
+                      "Margin" = 4,
+                      "cT" = 6,
+                      "cN" = 4,
+                      "Overall Clinical Stage" = 5,
+                      "pT" = 6,
+                      "pN" = 4,
+                      "Overall Pathological Stage" = 5))
+```
+
+# Function for summarizing non-metastatic rectal cancer pre-op RT data
+```{r summary_function_rt}
+summary_pre_op_rt <- function(df, rt_course_filter, group_var) {
+  rt_filter <- case_when(rt_course_filter == "short" ~ "Short-course RT",
+                         rt_course_filter == "long" ~ "Long-course chemoRT",
+                         rt_course_filter == "all" ~ c("Short-course RT","Long-course chemoRT"))
+  var <- deparse(substitute(group_var))
+  Reduce(function(x, y) merge(x, y, by = var, all = TRUE),
+         list(df %>% 
+                filter(rt_course %in% rt_filter,
+                       M1_at_Dx == 0,
+                       neoadjuvant == 1) %>% 
+                group_by(age_group2, {{group_var}}, .drop = FALSE) %>% 
+                summarize(sub_total = n()) %>% 
+                pivot_wider(names_from = age_group2, values_from = sub_total) %>% 
+                mutate_at(vars(-var), ~replace(., is.na(.), 0)) %>% 
+                select(-`>=50`),
+              df %>% 
+                filter(rt_course %in% rt_filter,
+                       M1_at_Dx == 0,
+                       neoadjuvant == 1) %>% 
+                group_by(age_group1, {{group_var}}, .drop = FALSE) %>% 
+                summarize(sub_total = n()) %>% 
+                pivot_wider(names_from = age_group1, values_from = sub_total) %>% 
+                mutate_at(vars(-var), ~replace(., is.na(.), 0)),
+              df %>% 
+                filter(rt_course %in% rt_filter,
+                       M1_at_Dx == 0,
+                       neoadjuvant == 1) %>% 
+                group_by({{group_var}}, .drop = FALSE) %>% 
+                summarize(`Grand Total` = n()) %>% 
+                mutate_at(vars(-var), ~replace(., is.na(.), 0)))
+  ) %>% 
+    arrange({{group_var}}) %>%
+    mutate({{group_var}} := as.character({{group_var}})) %>%
+    filter(!is.na({{group_var}})) %>%
+    bind_rows(summarize(., across(where(is.numeric), sum),
+                        across(where(is.character), ~"Subtotal"))) %>%
+    rename(Parameter = {{group_var}}) %>% 
+    
+    # add percentage
+    mutate_at(vars(-Parameter),
+              ~if_else((Parameter != "Subtotal") & (.x != 0),
+                       paste0(.x, ' (', sprintf("%.1f", round(.x/.x[Parameter == "Subtotal"]*100, 1)), ')'),
+                       # paste0(.x, ' (', sprintf("%.1f", round(.x/sum(.x)*100, 1)), ')'),
+                       as.character(.x)))
+}
+```
+
+# Table 2: Outcome for all non-metastatic rectal cancer cases with neoadjuvant therapy
+```{r summary_table2, echo = FALSE}
+summary2_combined <- bind_rows(summary_general(data_filtered %>%
+                                                 filter(neoadjuvant == 1, rt_course != "Long-course RT"), rt_course),
+                               summary_pre_op_rt(data_filtered, "all", cT), 
+                               summary_pre_op_rt(data_filtered, "all", cN),
+                               summary_pre_op_rt(data_filtered, "all", overall_clin_stg),
+                               summary_pre_op_rt(data_filtered, "all", pT),
+                               summary_pre_op_rt(data_filtered, "all", pN),
+                               summary_pre_op_rt(data_filtered, "all", overall_path_stg),
+                               summary_pre_op_rt(data_filtered, "all", T_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "all", N_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "all", overall_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "all", node_total),
+                               summary_pre_op_rt(data_filtered, "all", node_positive),
+                               summary_pre_op_rt(data_filtered, "all", pCR)) %>% 
+  rename(`All RT course` = Parameter)
+
+kable(summary2_combined, align = "lcccccc") %>% 
+  kable_classic(bootstrap_options = c("hover", "responsive"),
+                full_width = F,
+                fixed_thead = T) %>% 
+  row_spec(0, bold = T) %>% 
+  pack_rows(index = c("Neoadjuvant Therapy" = 3,
+                      "cT Stage" = 5,
+                      "cN Stage" = 4,
+                      "Overall Clinical Stage" = 4,
+                      "ypT Stage" = 6,
+                      "ypN Stage" = 4,
+                      "Overall Pathological Stage" = 5,
+                      "T Stage Change" = 4,
+                      "N Stage Change" = 4,
+                      "Overal Stage Change" = 4,
+                      "Total Number of Nodes" = 3,
+                      "Total Number of Positive Nodes" = 6,
+                      "pCR Status" = 3))
+```
+
+# Table 3: Outcome for non-metastatic rectal cancer cases with neoadjuvant therapy and short-course RT
+```{r summary_table3, echo = FALSE}
+summary3_combined <- bind_rows(summary_pre_op_rt(data_filtered, "short", cT),
+                               summary_pre_op_rt(data_filtered, "short", cN),
+                               summary_pre_op_rt(data_filtered, "short", overall_clin_stg),
+                               summary_pre_op_rt(data_filtered, "short", pT),
+                               summary_pre_op_rt(data_filtered, "short", pN),
+                               summary_pre_op_rt(data_filtered, "short", overall_path_stg),
+                               summary_pre_op_rt(data_filtered, "short", T_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "short", N_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "short", overall_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "short", node_total),
+                               summary_pre_op_rt(data_filtered, "short", node_positive),
+                               summary_pre_op_rt(data_filtered, "short", pCR)) %>% 
+  rename(`Short-course RT` = Parameter)
+
+kable(summary3_combined, align = "lcccccc") %>% 
+  kable_classic(bootstrap_options = c("hover", "responsive"),
+                full_width = F,
+                fixed_thead = T) %>% 
+  row_spec(0, bold = T) %>% 
+  pack_rows(index = c("cT Stage" = 5,
+                      "cN Stage" = 4,
+                      "Overall Clinical Stage" = 4,
+                      "ypT Stage" = 6,
+                      "ypN Stage" = 4,
+                      "Overall Pathological Stage" = 5,
+                      "T Stage Change" = 4,
+                      "N Stage Change" = 4,
+                      "Overal Stage Change" = 4,
+                      "Total Number of Nodes" = 3,
+                      "Total Number of Positive Nodes" = 6,
+                      "pCR Status" = 3))
+```
+
+# Table 4: Outcome for non-metastatic rectal cancer cases with neoadjuvant therapy and long-course chemoRT
+```{r summary_table4, echo = FALSE}
+summary4_combined <- bind_rows(summary_pre_op_rt(data_filtered, "long", cT),
+                               summary_pre_op_rt(data_filtered, "long", cN),
+                               summary_pre_op_rt(data_filtered, "long", overall_clin_stg),
+                               summary_pre_op_rt(data_filtered, "long", pT),
+                               summary_pre_op_rt(data_filtered, "long", pN),
+                               summary_pre_op_rt(data_filtered, "long", overall_path_stg),
+                               summary_pre_op_rt(data_filtered, "long", T_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "long", N_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "long", overall_stg_change_status),
+                               summary_pre_op_rt(data_filtered, "long", node_total),
+                               summary_pre_op_rt(data_filtered, "long", node_positive),
+                               summary_pre_op_rt(data_filtered, "long", pCR)) %>% 
+  rename(`Long-course chemoRT` = Parameter)
+
+kable(summary4_combined, align = "lcccccc") %>% 
+  kable_classic(bootstrap_options = c("hover", "responsive"),
+                full_width = F,
+                fixed_thead = T) %>% 
+  row_spec(0, bold = T) %>% 
+  pack_rows(index = c("cT Stage" = 5,
+                      "cN Stage" = 4,
+                      "Overall Clinical Stage" = 3,
+                      "ypT Stage" = 6,
+                      "ypN Stage" = 4,
+                      "Overall Pathological Stage" = 5,
+                      "T Stage Change" = 4,
+                      "N Stage Change" = 4,
+                      "Overal Stage Change" = 4,
+                      "Total Number of Nodes" = 3,
+                      "Total Number of Positive Nodes" = 6,
+                      "pCR Status" = 3))
+```
+
+# Figure 1: Clinical and pathological staging for all non-metastatic rectal cancer cases
+```{r figure1_data}
+figure1_data <- data_filtered %>% 
+  filter(M1_at_Dx == 0) %>% 
+  select(cT, cN, overall_clin_stg, pT, pN, overall_path_stg, age_group1, age_group2) %>% 
+  rename(`Overall Clinical` = overall_clin_stg,
+         `Overall Pathological` = overall_path_stg) %>% 
+  mutate_all(as.factor)
+
+figure1_color <- c("#e0f3f8", "#74add1", "#fdae61", "#f46d43", "#a50026")
+```
+
+## Panel A: Young age groups
+```{r figure1_panelA_function}
+figure1_panelA_plot <- function(df, var_name) {
+  df %>% 
+    filter(!is.na({{var_name}})) %>% 
+    group_by({{var_name}}, age_group2, .drop = FALSE) %>%
+    summarize(n = n()) %>% 
+    group_by(age_group2) %>% 
+    mutate(n_total = sum(n),
+           percent = round(n / n_total *100, 2)) %>% 
+    ungroup() %>% 
+    bind_cols(binom.confint(.$n, .$n_total, conf.level = 0.95, methods = "exact")[c("lower", "upper")]*100) %>% 
+    ggplot(aes(age_group2, percent, group = {{var_name}})) +
+    geom_point(aes(color = {{var_name}}), size = 2.5) +
+    geom_line(aes(color = {{var_name}}), size = 1) +
+    geom_ribbon(aes(ymin = lower, ymax = upper, fill = {{var_name}}), alpha = 0.1) +
+    scale_color_manual(values = figure1_color,
+                       name = str_wrap(paste0(deparse(substitute(var_name)), " Stage"), 10)) +
+    scale_fill_manual(values = figure1_color,
+                      name = str_wrap(paste0(deparse(substitute(var_name)), " Stage"), 10)) +
+    scale_x_discrete(labels = c("<=29" = "\u226429",
+                                ">=50" = "\u226550")) +
+    labs(x = "Age Group",
+         y = "Percentage (%)",
+         title = str_wrap(paste0("Distribution of ", deparse(substitute(var_name)), " Stages"), 45)) +
+    ylim(0, 100) +
+    theme_light(base_size = 18) +
+    theme(axis.text = element_text(size = 18))
+}
+```
+
+```{r figure1_panelA, echo = FALSE, fig.asp = 0.8, out.width = "50%"}
+figure1_panelA_plot(figure1_data, cT)
+figure1_panelA_plot(figure1_data, cN)
+figure1_panelA_plot(figure1_data, pT)
+figure1_panelA_plot(figure1_data, pN)
+figure1_panelA_plot(figure1_data, `Overall Clinical`)
+figure1_panelA_plot(figure1_data, `Overall Pathological`)
+```
+
+## Panel B: All age groups
+```{r figure1_panelB_function}
+figure1_panelB_plot_side <- function(df, var_name) {
+  df %>% 
+    filter(!is.na({{var_name}})) %>% 
+    group_by({{var_name}}, age_group1) %>%
+    summarize(n = n()) %>% 
+    group_by(age_group1) %>% 
+    mutate(n_total = sum(n),
+           percent = round(n / n_total *100, 2)) %>% 
+    ggplot(aes(age_group1, percent, fill = {{var_name}})) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_text(aes(label = paste0(sprintf("%.1f", percent), "%\n(", n, ")")),
+              position = position_dodge(width = 0.9), vjust = -0.25,
+              color = "black", size = 3.5) +
+    scale_fill_manual(values = figure1_color,
+                      name = str_wrap(paste0(deparse(substitute(var_name)), " Stage"), 10)) +
+    scale_x_discrete(labels = c(">=50" = "\u226550")) +
+    labs(x = "Age Group",
+         y = "Percentage (%)",
+         title = str_wrap(paste0("Distribution of ", deparse(substitute(var_name)), " Stages"), 45)) +
+    theme_light(base_size = 18) +
+    theme(axis.text = element_text(size = 18)) +
+    ylim(0, 100)
+}
+```
+
+```{r figure1_panelB_1, echo = FALSE, out.width = "50%"}
+figure1_panelB_plot_side(figure1_data, cT)
+figure1_panelB_plot_side(figure1_data, cN)
+figure1_panelB_plot_side(figure1_data, pT)
+figure1_panelB_plot_side(figure1_data, pN)
+figure1_panelB_plot_side(figure1_data, `Overall Clinical`)
+figure1_panelB_plot_side(figure1_data, `Overall Pathological`)
+```
+
+## Panel B: All age groups (Alternative plots)
+```{r figure1_panelB_alt}
+figure1_panelB_plot_stack <- function(df, var_name) {
+  df %>% 
+    filter(!is.na({{var_name}})) %>% 
+    group_by({{var_name}}, age_group1) %>%
+    summarize(n = n()) %>% 
+    group_by(age_group1) %>% 
+    mutate(n_total = sum(n),
+           percent = round(n / n_total *100, 2),
+           y_pos_left = if_else(age_group1 == "<50", 100 - (cumsum(percent) - percent/2), NA_real_),
+           y_pos_right = if_else(age_group1 == ">=50", 100 - (cumsum(percent) - percent/2), NA_real_)) %>% 
+    ggplot(aes(age_group1, percent, fill = {{var_name}})) +
+    geom_bar(stat = "identity", position = "stack", width = 0.3) +
+    geom_label_repel(aes(x = 0.85, y = y_pos_left,
+                         label = paste0(sprintf("%.1f", percent), "%\n(", n, ")")),
+                     nudge_x = -0.4, direction = "y", box.padding = 0.5, 
+                     color = "black", alpha = 0.8, size = 3.5, fontface = "bold", 
+                     show.legend = FALSE) +
+    geom_label_repel(aes(x = 2.15, y = y_pos_right,
+                         label = paste0(sprintf("%.1f", percent), "%\n(", n, ")")),
+                     nudge_x = 0.4, direction = "y", box.padding = 0.5, 
+                     color = "black", alpha = 0.8, size = 3.5, fontface = "bold", 
+                     show.legend = FALSE) +
+    scale_fill_manual(values = figure1_color,
+                      name = str_wrap(paste0(deparse(substitute(var_name)), " Stage"), 10)) +
+    scale_x_discrete(labels = c(">=50" = "\u226550")) +
+    labs(x = "Age Group",
+         y = "Percentage (%)",
+         title = str_wrap(paste0("Distribution of ", deparse(substitute(var_name)), " Stages"), 45)) +
+    theme_light(base_size = 18) +
+    theme(axis.text = element_text(size = 18))
+}
+```
+
+```{r figure1_panelB_2, echo = FALSE, out.width = "50%"}
+figure1_panelB_plot_stack(figure1_data, cT)
+figure1_panelB_plot_stack(figure1_data, cN)
+figure1_panelB_plot_stack(figure1_data, pT)
+figure1_panelB_plot_stack(figure1_data, pN)
+figure1_panelB_plot_stack(figure1_data, `Overall Clinical`)
+figure1_panelB_plot_stack(figure1_data, `Overall Pathological`)
+```
+
+# Figure 2: Effectiveness of long-course ChemoRT treatment among all non-metastatic rectal cancer cases
+```{r figure2_data}
+figure2_data <- data_filtered %>% 
+  filter(M1_at_Dx == 0,
+         neoadjuvant == 1) %>% 
+  select(cT, cN, overall_clin_stg, pT, pN, overall_path_stg,
+         T_stg_change_status, N_stg_change_status, overall_stg_change_status,
+         rt_course, pCR, age_group1, age_group2) %>% 
+  mutate(overall_stg_change_status = case_when(pCR == "Yes" ~ "Complete",
+                                               TRUE ~ as.character(overall_stg_change_status))) %>% 
+  mutate_all(as.factor) %>% 
+  rename(`Overall Clinical` = overall_clin_stg,
+         `Overall Pathological` = overall_path_stg)
+```
+
+## Panel A: Treatment types
+```{r figure2_panelA_function}
+figure2_panelA_color <- c("#abd9e9", "#fdae61")
+
+figure2_panelA_plot <- function(df, age_group_var) {
+  df %>% 
+    filter(!is.na(rt_course), rt_course != "Long-course RT") %>% 
+    group_by(rt_course, {{age_group_var}}) %>%
+    summarize(n = n()) %>% 
+    group_by({{age_group_var}}) %>% 
+    mutate(n_total = sum(n),
+           percent = round(n / n_total * 100, 1)) %>% 
+    ggplot(aes(x = factor(1), y = percent, fill = rt_course)) +
+    geom_bar(stat = "identity", color = "white") +
+    coord_polar("y", start = 0) +
+    facet_grid(cols = vars({{age_group_var}}), labeller = as_labeller(c("<50" = "Age group: <50",
+                                                                        ">=50" = "Age group: \u226550",
+                                                                        "<=29" = "Age group: \u226429",
+                                                                        "30-39" = "30-39",
+                                                                        "40-49" = "40-49"))) +
+    geom_text(aes(label = paste0(n,"\n(", sprintf("%.1f", percent), "%)")),
+              position = position_stack(vjust = 0.5),
+              color = "black", size = 3.5) +
+    scale_fill_manual(values = figure2_panelA_color,
+                      name = "Neoadjuvant Treatment") +
+    theme_void(base_size = 14) +
+    theme(strip.text = element_text(margin = margin(b = 5)))
+}
+```
+
+```{r figure2_panelA_1, echo = FALSE, out.width = "100%"}
+figure2_panelA_plot(figure2_data, age_group1)
+figure2_panelA_plot(figure2_data %>% filter(age_group2 != ">=50"), age_group2)
+```
+
+## Panel B: Stage change
+```{r figure2_panelB_function}
+figure2_panelB_color <- c("#313695", "#abd9e9", "#f46d43", "#a50026")
+
+figure2_panelB_plot <- function(df, age_group_var) {
+  df %>% 
+    filter(rt_course == "Long-course chemoRT") %>% 
+    group_by({{age_group_var}}, `Overall Clinical`, `Overall Pathological`, overall_stg_change_status) %>%
+    drop_na() %>% 
+    summarize(n = n()) %>% 
+    group_by({{age_group_var}}) %>% 
+    mutate(n_total = sum(n),
+           percent = round(n / n_total * 100, 1)) %>% 
+    ggplot(aes(y = percent, axis1 = `Overall Clinical`, axis2 = `Overall Pathological`)) +
+    coord_cartesian(clip = "off") +
+    geom_alluvium(aes(fill = overall_stg_change_status),
+                  width = 1/12, reverse =FALSE) +
+    geom_stratum(width = 0.1, reverse =FALSE) +
+    geom_label(stat = "stratum", aes(label = after_stat(stratum)),
+               size = 4, fontface = "bold",
+               label.size = NA, fill = NA, reverse =FALSE) +
+    facet_wrap(vars({{age_group_var}}), labeller = as_labeller(c("<50" = "Age group: <50",
+                                                                 ">=50" = "Age group: \u226550")),
+               scales = "free") +
+    scale_x_discrete(limits = c("Overall\nClinical\nStage", "Overall\nPathological\nStage"),
+                     expand = c(0.01, 0.01)) +
+    scale_fill_manual(values = figure2_panelB_color,
+                      name = "Stage Change") +
+    labs(title = str_wrap(paste0("Overall Stage Change"), 45)) +
+    theme_void(base_size = 12) +
+    theme(axis.text.x = element_text(size = 12),
+          plot.margin = margin(rep(25,10)),
+          aspect.ratio = 1.2,
+          panel.spacing = unit(3, "lines"),
+          strip.text = element_text(margin = margin(b = 5)))
+}
+```
+
+```{r figure2_panelB, echo = FALSE, out.width = "100%"}
+figure2_panelB_plot(figure2_data, age_group1)
+```
+
+## Panel C: pCR rate
+```{r figure2_panelC_function}
+figure2_panelC_color <- c("#fdae61", "#abd9e9")
+
+figure2_panelC_plot <- function(df, age_group_var) {
+  temp_df <- df %>% 
+    filter(!is.na(pCR), rt_course == "Long-course chemoRT") %>% 
+    group_by({{age_group_var}}, pCR) %>%
+    summarize(n = n()) %>% 
+    group_by({{age_group_var}}) %>%
+    mutate(n_total = sum(n),
+           percent = round(n / n_total *100, 2)) %>%
+    ungroup() %>%
+    bind_cols(binom.confint(.$n, .$n_total, conf.level = 0.95, methods = "exact")[c("lower", "upper")]*100)
+  
+  n_total_label <- temp_df %>% 
+    select({{age_group_var}}, n_total) %>% 
+    unique()
+
+  temp_df %>% 
+    ggplot(aes(x = {{age_group_var}}, y = percent, fill = pCR)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    geom_errorbar(aes(ymin = lower, ymax = upper), width = .2, position = position_dodge(0.9)) +
+    scale_fill_manual(values = figure2_panelC_color,
+                      name = "pCR") +
+    labs(x = "Age Group",
+         y = "pCR Rate (%)",
+         title = str_wrap("pCR rate in different age groups", 45)) +
+    scale_x_discrete(labels = c("<=29" = paste0("\u226429 \n(n=", filter(n_total_label, {{age_group_var}} == "<=29")$n_total, ")"),
+                                "30-39" = paste0("30-39 \n(n=", filter(n_total_label, {{age_group_var}} == "30-39")$n_total, ")"),
+                                "40-49" = paste0("40-49 \n(n=", filter(n_total_label, {{age_group_var}} == "40-49")$n_total, ")"),
+                                "<50" = paste0("<50 \n(n=", filter(n_total_label, {{age_group_var}} == "<50")$n_total, ")"),
+                                ">=50" = paste0("\u226550 \n(n=", filter(n_total_label, {{age_group_var}} == ">=50")$n_total, ")"))) +
+    ylim(0, 100) +
+    theme_light(base_size = 18) +
+    theme(axis.text = element_text(size = 18),
+          strip.text = element_text(margin = margin(b = 5)))
+}
+```
+
+```{r figure2_panelC, echo = FALSE, out.width = "50%"}
+figure2_panelC_plot(figure2_data, age_group1)
+figure2_panelC_plot(figure2_data %>% filter(age_group2 != ">=50"), age_group2)
+```
+
+
+# Figure 3: Survival analysis for all rectal cancer cases
+```{r figure3_data}
+figure3_data <- data_filtered %>% 
+  select(age_group1, age_group2, diagnosis_date, M1_at_Dx, neoadjuvant, rt_course,
+         survyrs, pat_status, surv_status, death_date,
+         colorectaldeath, colorectaldthdat, crc_death_status,
+         m1dtofdx, m1site, fst_relapse_date, fst_reg_dist_date,
+         LOCIND, LOCDATE, REGIND, REGDATE, DISTIND, DISTDATE,
+         subseq_colorectalca, subseq_CRC_dx_date,
+         recurr_status, dis_free_yrs, crc_recurr_status, crc_recurr_free_yrs)
+```
+
+```{r figure3_function_maxyear}
+figure3_plot_maxyear <- function(df, time_var, status_var, age_group_var, title_text, break_yr) {
+  fit <- eval(substitute(survfit(Surv(time_var, status_var) ~ age_group_var, data = df)))
+  figure3_color <- case_when(length(fit[["strata"]]) == 2 ~ list(c("#0571b0", "#ca0020")),
+                             length(fit[["strata"]]) == 3 ~ list(c("#abd9e9", "#fdae61", "#f46d43")),
+                             length(fit[["strata"]]) == 4 ~ list(c("#abd9e9", "#fdae61", "#f46d43", "#a50026")))[[1]]
+  legend_text <- if_else(deparse(substitute(age_group_var)) == "age_group1", list(c("<50", "\u226550")),
+                         list(c("\u226429", "30-39", "40-49", "\u226550")))[[1]]
+  ggsurvplot(fit,
+             palette = figure3_color,
+             pval = TRUE,
+             conf.int = FALSE,
+             risk.table = TRUE,
+             tables.height = 0.3,
+             risk.table.fontsize = 3.5,
+             break.time.by = break_yr,
+             surv.median.line = "hv",
+             xlab = "Time (year)",
+             ylab = "Survival Probability",
+             title = str_wrap(title_text, 62),
+             legend.title = "Age Group",
+             legend.labs = legend_text[1:length(figure3_color)])
+}
+```
+
+```{r figure3_function_month}
+figure3_plot_month <- function(df, time_var, status_var, age_group_var, title_text, break_yr, max_yr) {
+  # df <- df %>%
+  #   mutate({{status_var}} := case_when({{time_var}} > max_yr ~ 0,
+  #                                      TRUE ~ {{status_var}}),
+  #          {{time_var}} := case_when({{time_var}} > max_yr ~ max_yr,
+  #                                      TRUE ~ {{time_var}}))
+  fit <- eval(substitute(survfit(Surv(time_var, status_var) ~ age_group_var, data = df)))
+  figure3_color <- case_when(length(fit[["strata"]]) == 2 ~ list(c("#0571b0", "#ca0020")),
+                             length(fit[["strata"]]) == 3 ~ list(c("#abd9e9", "#fdae61", "#f46d43")),
+                             length(fit[["strata"]]) == 4 ~ list(c("#abd9e9", "#fdae61", "#f46d43", "#a50026")))[[1]]
+  legend_text <- if_else(deparse(substitute(age_group_var)) == "age_group1", list(c("<50", "\u226550")),
+                         list(c("\u226429", "30-39", "40-49", "\u226550")))[[1]]
+  ggsurvplot(fit,
+             palette = figure3_color,
+             xscale = "y_m",
+             pval = TRUE,
+             conf.int = FALSE,
+             risk.table = TRUE,
+             tables.height = 0.3,
+             risk.table.fontsize = 3.5,
+             break.time.by = break_yr,
+             surv.median.line = "hv",
+             xlab = "Time (month)",
+             ylab = "Survival Probability",
+             title = str_wrap(title_text, 62),
+             legend.title = "Age Group",
+             legend.labs = legend_text[1:length(figure3_color)],
+             xlim = c(0, max_yr))
+}
+```
+
+## Panel A: Overall survival
+```{r figure3_overall_1, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 2)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             survyrs, surv_status, age_group2,
+             "Overall survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 2)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             survyrs, surv_status, age_group2,
+             "Overall survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 0.5, max_yr = 5)
+```
+<br />
+<br />
+<br />
+<br />
+```{r figure3_overall_2, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 1),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for all metastatic rectal cancer patients",
+             break_yr = 1)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 1, age_group2 != ">=50"),
+             survyrs, surv_status, age_group2,
+             "Overall survival probability for metastatic rectal cancer patients under 50 years old",
+             break_yr = 1)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 1),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for all metastatic rectal cancer patients",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 1, age_group2 != ">=50"),
+             survyrs, surv_status, age_group2,
+             "Overall survival probability for metastatic rectal cancer patients under 50 years old",
+             break_yr = 0.5, max_yr = 5)
+```
+<br />
+<br />
+<br />
+<br />
+```{r figure3_overall_3, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 1)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 1)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             survyrs, surv_status, age_group1,
+             "Overall survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 0.5, max_yr = 5)
+```
+<br />
+<br />
+<br />
+
+### Panel B: Disease specific survival
+```{r figure3_disease_specific_1, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 2)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             survyrs, crc_death_status, age_group2,
+             "Disease specific survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 2)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             survyrs, crc_death_status, age_group2,
+             "Disease specific survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 0.5, max_yr = 5)
+```
+<br />
+<br />
+<br />
+<br />
+```{r figure3_disease_specific_2, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 1),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for all metastatic rectal cancer patients",
+             break_yr = 1)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 1, age_group2 != ">=50"),
+             survyrs, crc_death_status, age_group2,
+             "Disease specific survival probability for metastatic rectal cancer patients under 50 years old",
+             break_yr = 1)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 1),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for all metastatic rectal cancer patients",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 1, age_group2 != ">=50"),
+             survyrs, crc_death_status, age_group2,
+             "Disease specific survival probability for metastatic rectal cancer patients under 50 years old",
+             break_yr = 0.5, max_yr = 5)
+```
+<br />
+<br />
+<br />
+<br />
+```{r figure3_disease_specific_3, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 1)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 1)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             survyrs, crc_death_status, age_group1,
+             "Disease specific survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 0.5, max_yr = 5)
+```
+<br />
+<br />
+<br />
+
+### Panel C: Disease free survival
+```{r figure3_disease_free_1, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 2)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             dis_free_yrs, recurr_status, age_group2,
+             "Disease free survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 2)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             dis_free_yrs, recurr_status, age_group2,
+             "Disease free survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 0.5, max_yr = 5)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for all non-metastatic rectal cancer patients",
+             break_yr = 1, max_yr = 10)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             dis_free_yrs, recurr_status, age_group2,
+             "Disease free survival probability for non-metastatic rectal cancer patients under 50 years old",
+             break_yr = 1, max_yr = 10)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0),
+             crc_recurr_free_yrs, crc_recurr_status, age_group1,
+             "Disease free survival probability for all non-metastatic rectal cancer patients with non-CRC deaths censored",
+             break_yr = 1, max_yr = 10)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, age_group2 != ">=50"),
+             crc_recurr_free_yrs, crc_recurr_status, age_group2,
+             "Disease free survival probability for non-metastatic rectal cancer patients under 50 years old with non-CRC deaths censored",
+             break_yr = 1, max_yr = 10)
+```
+<br />
+<br />
+<br />
+<br />
+```{r figure3_disease_free_2, echo = FALSE, out.width = "50%"}
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 1)
+figure3_plot_maxyear(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 1)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 0.5, max_yr = 5)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 0.5, max_yr = 5)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received long course chemoRT",
+             break_yr = 1, max_yr = 10)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             dis_free_yrs, recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received short course RT",
+             break_yr = 1, max_yr = 10)
+
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Long-course chemoRT"),
+             crc_recurr_free_yrs, crc_recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received long course chemoRT with non-CRC deaths censored",
+             break_yr = 1, max_yr = 10)
+figure3_plot_month(figure3_data %>% filter(M1_at_Dx == 0, neoadjuvant == 1, rt_course == "Short-course RT"),
+             crc_recurr_free_yrs, crc_recurr_status, age_group1,
+             "Disease free survival probability for non-metastatic rectal cancer patients who received short course RT with non-CRC deaths censored",
+             break_yr = 1, max_yr = 10)
+```
+
+
+
+# Figure 4: Cox regression analysis
+```{r figure4_data}
+figure4_data <- data_filtered %>% 
+  filter(M1_at_Dx == 0, 
+         rt_course != "Long-course RT" | is.na(rt_course),
+         !(rt_merged %in% c(5, 6, 77, 88, NA)),
+         !is.na(loc_merged),
+         !is.na(overall_path_stg)) %>% 
+  droplevels() %>% 
+  select(age_group1, age_group2, sex, loc_merged, overall_clin_stg,
+         overall_path_stg, neoadjuvant, rt_merged, rt_course,
+         survyrs, pat_status, surv_status, colorectaldeath, crc_death_status,
+         LOCIND, REGIND, DISTIND, subseq_colorectalca, recurr_status,
+         dis_free_yrs, crc_recurr_status) %>% 
+  mutate(
+    across(c(overall_clin_stg, overall_path_stg), ~as.factor(.x)),
+    Age = factor(age_group1, labels = c("<50", "50+")),
+    rt_course = as.character(rt_course),
+    rt_course = if_else(rt_merged %in% c(0, 3, 4), "No", rt_course) %>% 
+      factor(levels = c("Long-course chemoRT", "Short-course RT", "No"))) %>% 
+  filter(!(neoadjuvant == 0 & rt_course %in% c("Long-course chemoRT", "Short-course RT"))) %>% 
+  rename(Sex = sex,
+         `Tumour Location` = loc_merged,
+         `Overall Pathological Stage` = overall_path_stg,
+         `Neoadjuvant Therapy` = rt_course)
+```
+
+```{r figure4_function}
+figure4_plot <- function(df, time_var, status_var, title_text) {
+  fit_ph <- eval(substitute(coxph(Surv(time_var, status_var) ~
+                                    Sex + Age + `Tumour Location` +
+                                    `Overall Pathological Stage` +
+                                    `Neoadjuvant Therapy`,
+                                  data = as.data.frame(df))))
+  ggforest(fit_ph,
+           main = title_text,
+           cpositions = c(0.005, 0.21, 0.4),
+           fontsize = 0.6,
+           refLabel = "Reference")
+}
+```
+
+```{r figure4, echo = FALSE, out.width = "100%"}
+figure4_plot(figure4_data, survyrs, surv_status,
+             "Hazard ratio of overall survival for all non-metastatic patients")
+figure4_plot(figure4_data, survyrs, crc_death_status,
+             "Hazard ratio of disease specific survival for all non-metastatic patients")
+figure4_plot(figure4_data, dis_free_yrs, recurr_status,
+             "Hazard ratio of disease free survival for all non-metastatic patients")
+```
+
+<div class="tocify-extend-page" data-unique="tocify-extend-page" style="height: 0;"></div>
